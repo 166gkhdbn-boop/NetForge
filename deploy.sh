@@ -627,11 +627,13 @@ def gen_xray_cfg(st):
                 },
                 "xhttpSettings": {
                     "path": secp,
-                    "mode": "stream-one",
+                    "mode": "auto",
                     "extra": {
                         "xPaddingBytes": "1-1",
                         "xPaddingObfsMode": True,
-                        "xPaddingKey": "iran"
+                        "xPaddingKey": "iran",
+                        "xPaddingHeader": "iran",
+                        "scMaxEachPostBytes": "1000000"
                     }
                 }
             },
@@ -884,37 +886,63 @@ def gen_vless(st):
     
     uuid = st['uuid']
     sni = st.get('sni', 'kind.sigs.k8s.io')
-    secp = st.get('secp', '/secpath-')
+    secp = st.get('secp', '')
     site = st['site_url']
+    # Strip protocol from site URL for host parameter
+    site_host = site.replace('https://', '').replace('http://', '')
+    ip = st.get('server_ip', '')
+    port = st.get('xray_port', 444)
     
+    # Build extra JSON with all xPadding settings + x-host header
+    extra_obj = {
+        "xPaddingBytes": "1-1",
+        "xPaddingObfsMode": True,
+        "scMaxEachPostBytes": "1000000",
+        "xPaddingKey": "iran",
+        "xPaddingHeader": "iran",
+        "headers": {
+            "x-host": f"{ip}:{port}"
+        }
+    }
+    extra_encoded = urllib.parse.quote(json.dumps(extra_obj, separators=(',', ':')))
+    
+    # Address = SNI domain, host param = Netlify site hostname (no protocol)
     link = (
-        f"vless://{uuid}@{site}:443?"
+        f"vless://{uuid}@{sni}:443?"
         f"type=xhttp&security=tls&sni={sni}"
-        f"&path={secp}&mode=stream-one&"
-        f"xPaddingBytes=1-1&xPaddingObfsMode=true&xPaddingKey=iran"
-        f"&fp=chrome&alpn=h2%2Chttp%2F1.1#NetForge"
+        f"&path={urllib.parse.quote(secp)}&mode=auto"
+        f"&alpn=h2%2Chttp%2F1.1&encryption=none"
+        f"&fp=chrome&insecure=0&allowInsecure=0"
+        f"&host={site_host}"
+        f"&extra={extra_encoded}"
+        f"#NetForge"
     )
     
-    # QR-friendly version
+    # Short version for QR
     link_short = (
-        f"vless://{uuid}@{site}:443?"
+        f"vless://{uuid}@{sni}:443?"
         f"type=xhttp&security=tls&sni={sni}"
-        f"&path={secp}&mode=stream-one#NetForge"
+        f"&path={urllib.parse.quote(secp)}&mode=auto"
+        f"&host={site_host}"
+        f"&extra={extra_encoded}"
+        f"#NetForge"
     )
     
     lines = [
-        f"{gold(DIA)}  {cyn('Address')}       {mint(site)}",
+        f"{gold(DIA)}  {cyn('Address')}       {mint(sni)}",
+        f"{gold(DIA)}  {cyn('Host')}          {wht(site)}",
         f"{gold(DIA)}  {cyn('Port')}          {wht('443')}",
         f"{gold(DIA)}  {cyn('UUID')}          {dim(uuid[:18])}...",
         f"{gold(DIA)}  {cyn('Network')}       {wht('xhttp')}",
         f"{gold(DIA)}  {cyn('Security')}      {wht('tls')}",
         f"{gold(DIA)}  {cyn('SNI')}           {wht(sni)}",
         f"{gold(DIA)}  {cyn('Path')}          {wht(secp)}",
-        f"{gold(DIA)}  {cyn('Mode')}          {wht('stream-one')}",
+        f"{gold(DIA)}  {cyn('Mode')}          {wht('auto')}",
         f"{gold(DIA)}  {cyn('xPadding')}      {grn('enabled')}",
+        f"{gold(DIA)}  {cyn('x-host')}        {dim(f'{ip}:{port}')}",
     ]
     
-    print(double_box(lines, 62, title="Connection Details", title_color=C.GOLD, border_color=C.TEAL))
+    print(double_box(lines, 64, title="Connection Details", title_color=C.GOLD, border_color=C.TEAL))
     
     # Show links
     print(f"\n  {teal(bold('Full VLESS Link:'))}")
@@ -922,7 +950,7 @@ def gen_vless(st):
     for i, chunk in enumerate(textwrap.wrap(link, 76)):
         print(f"  {mint(chunk)}")
     
-    print(f"\n  {teal(bold('Short Link (QR-friendly):'))}")
+    print(f"\n  {teal(bold('QR-Friendly Link:'))}")
     print(f"  {dim(T * 58)}")
     for i, chunk in enumerate(textwrap.wrap(link_short, 76)):
         print(f"  {silver(chunk)}")
