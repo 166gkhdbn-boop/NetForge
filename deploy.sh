@@ -598,6 +598,36 @@ def gen_xray_cfg(st):
     secp = st.get("secp", "/secpath-" + rhex(8))
     st["secp"] = secp
     
+    # Check if real TLS certs exist
+    has_certs = os.path.isfile(f"{XDIR}/cert.pem") and os.path.isfile(f"{XDIR}/key.pem")
+    
+    stream = {
+        "network": "xhttp",
+        "security": "tls" if has_certs else "none",
+        "xhttpSettings": {
+            "path": secp,
+            "mode": "auto",
+            "extra": {
+                "xPaddingBytes": "1-1",
+                "xPaddingObfsMode": True,
+                "xPaddingKey": "iran",
+                "xPaddingHeader": "iran",
+                "scMaxEachPostBytes": "1000000"
+            }
+        }
+    }
+    
+    if has_certs:
+        stream["tlsSettings"] = {
+            "certificates": [{
+                "certificateFile": f"{XDIR}/cert.pem",
+                "keyFile": f"{XDIR}/key.pem"
+            }],
+            "minVersion": "1.3",
+            "alpn": ["h2", "http/1.1"],
+            "fingerprint": "chrome"
+        }
+    
     cfg = {
         "log": {"loglevel": "warning"},
         "stats": {},
@@ -613,30 +643,7 @@ def gen_xray_cfg(st):
                 "decryption": "none",
                 "fallbacks": []
             },
-            "streamSettings": {
-                "network": "xhttp",
-                "security": "tls",
-                "tlsSettings": {
-                    "certificates": [{
-                        "certificateFile": f"{XDIR}/cert.pem",
-                        "keyFile": f"{XDIR}/key.pem"
-                    }],
-                    "minVersion": "1.3",
-                    "alpn": ["h2", "http/1.1"],
-                    "fingerprint": "chrome"
-                },
-                "xhttpSettings": {
-                    "path": secp,
-                    "mode": "auto",
-                    "extra": {
-                        "xPaddingBytes": "1-1",
-                        "xPaddingObfsMode": True,
-                        "xPaddingKey": "iran",
-                        "xPaddingHeader": "iran",
-                        "scMaxEachPostBytes": "1000000"
-                    }
-                }
-            },
+            "streamSettings": stream,
             "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
         }],
         "outbounds": [{
@@ -655,6 +662,7 @@ def gen_xray_cfg(st):
     with open(cfg_path, "w") as f:
         json.dump(cfg, f, indent=2)
     
+    st["tls_enabled"] = has_certs
     return cfg_path
 
 def configure(st):
@@ -749,7 +757,7 @@ def deploy_netlify(st):
     port = st.get('xray_port', 444)
     sni = st.get('sni', 'kind.sigs.k8s.io')
     
-    origin = f"https://{ip}:{port}"
+    origin = f"http://{ip}:{port}"
     
     print(f"  {cyn(DOT)}  {wht('Preparing deployment files...')}")
     
