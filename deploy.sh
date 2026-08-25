@@ -409,7 +409,7 @@ def get_ip():
 
 def load_st():
     dd = {
-        "uuid": "", "sni": "kind.sigs.k8s.io", "alt_sni": "dl.google.com",
+        "uuid": "", "sni": "", "alt_sni": "",
         "xray_port": 444, "server_ip": "", "netlify_token": "",
         "deployments": [], "xray_installed": False, "xray_version": "",
         "site_name": "", "site_id": "", "site_url": ""
@@ -436,8 +436,6 @@ def show_status(st):
         f"{gold(DIA)}  {cyn('Xray Status')}    {status_dot(st.get('xray_installed', False))} {wht(st.get('xray_version', 'Not installed'))}",
         f"{gold(DIA)}  {cyn('Xray Port')}      {wht(str(st.get('xray_port', 444)))}",
         f"{gold(DIA)}  {cyn('UUID')}           {dim(st.get('uuid', '')[:16])}...",
-        f"{gold(DIA)}  {cyn('SNI')}            {wht(st.get('sni', 'N/A'))}",
-        f"{gold(DIA)}  {cyn('Alt SNI')}        {dim(st.get('alt_sni', 'N/A'))}",
         f"{gold(DIA)}  {cyn('Netlify Token')}  {mint('SET') if st.get('netlify_token') else red('NOT SET')}",
         f"{gold(DIA)}  {cyn('Site URL')}       {wht(st.get('site_url', 'No deployment')) if st.get('site_url') else dim('No deployment')}",
         f"{gold(DIA)}  {cyn('Deployments')}    {wht(str(len(st.get('deployments', []))))}",
@@ -548,29 +546,39 @@ WantedBy=multi-user.target
 # ═══════════════════════════════════════════════════════════
 #  XRAY CONFIG GENERATION
 # ═══════════════════════════════════════════════════════════
-RELAY_TPL = '''const SP="__SECPATH__";
-const FAKE_HTML = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>DevPulse</title><style>body{background:#0a0e1a;color:#c8d6e5;font-family:-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}h1{background:linear-gradient(90deg,#00d4ff,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:2rem}</style></head><body><h1>DevPulse Analytics</h1></body></html>";
+RELAY_TPL = r'''const SP="__SECPATH__";
+const FAKE_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DevPulse</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#0a0e1a;color:#c8d6e5;display:flex;justify-content:center;align-items:center;height:100vh}h1{background:linear-gradient(90deg,#00d4ff,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:2rem}</style></head><body><h1>DevPulse Analytics</h1></body></html>`;
+
 export default async (request, context) => {
   const url = new URL(request.url);
   const path = url.pathname;
+
   if (path === "/" || path === "/index.html") {
-    return new Response(FAKE_HTML, {headers:{"content-type":"text/html;charset=utf-8"}});
+    return new Response(FAKE_HTML, {headers: {"content-type": "text/html; charset=utf-8"}});
   }
+
   if (path === SP || path.startsWith(SP + "/")) {
     const origin = "__ORIGIN__";
     const headers = new Headers(request.headers);
-    headers.set("x-forwarded-for", request.headers.get("x-nf-client-connection-ip") || "");
+    const clientIP = request.headers.get("x-nf-client-connection-ip") || "";
+    headers.set("x-forwarded-for", clientIP);
+    headers.set("x-real-ip", clientIP);
+
     const opts = {method: request.method, headers};
-    opts.body = !["GET","HEAD"].includes(request.method) ? request.body : undefined;
+    if (!["GET", "HEAD"].includes(request.method)) {
+      opts.body = request.body;
+    }
+
     try {
       const resp = await fetch(origin + path + url.search, opts);
       const rh = new Headers(resp.headers);
       rh.delete("content-encoding");
       return new Response(resp.body, {status: resp.status, headers: rh});
     } catch(e) {
-      return new Response("relay error", {status: 502});
+      return new Response("relay error: " + e.message, {status: 502});
     }
   }
+
   return new Response("Not Found", {status: 404});
 };
 '''
@@ -580,7 +588,11 @@ TOML_CFG = r"""[build]
 
 [[edge_functions]]
   function = "relay"
-  path = "/__SECPATH__/*"
+  path = "__SECPATH__"
+
+[[edge_functions]]
+  function = "relay"
+  path = "__SECPATH__/*"
 
 [[edge_functions]]
   function = "relay"
@@ -593,9 +605,7 @@ def gen_xray_cfg(st):
     ip = st["server_ip"] or "0.0.0.0"
     port = st.get("xray_port", 444)
     uuid = st["uuid"]
-    sni = st.get("sni", "kind.sigs.k8s.io")
-    alt_sni = st.get("alt_sni", "dl.google.com")
-    secp = st.get("secp", "/secpath-" + rhex(8))
+    secp = st.get("secp", "/nf-" + rhex(8))
     st["secp"] = secp
     
     # Check if real TLS certs exist
@@ -605,7 +615,7 @@ def gen_xray_cfg(st):
         "network": "xhttp",
         "security": "tls" if has_certs else "none",
         "xhttpSettings": {
-            "path": secp,
+            "path": secp + "/",
             "mode": "auto",
             "extra": {
                 "xPaddingBytes": "1-1",
@@ -672,9 +682,10 @@ def configure(st):
     print(f"  {icon_kv(SQR, 'Server IP', st.get('server_ip', 'Auto'))}")
     print(f"  {icon_kv(SQR, 'Xray Port', str(st.get('xray_port', 444)))}")
     print(f"  {icon_kv(SQR, 'UUID', st.get('uuid', '')[:20] + '...')}")
-    print(f"  {icon_kv(SQR, 'SNI', st.get('sni', 'N/A'))}")
-    print(f"  {icon_kv(SQR, 'Alt SNI', st.get('alt_sni', 'N/A'))}")
     print(f"  {icon_kv(SQR, 'Secret Path', st.get('secp', 'auto-gen'))}")
+    if st.get('site_url'):
+        print(f"  {icon_kv(SQR, 'Site URL', st.get('site_url', ''))}")
+        print(f"  {icon_kv(SQR, 'SNI (auto)', st.get('site_url', '').replace('https://', '').replace('http://', ''))}")
     print()
     
     if not askyn("Change settings?", True):
@@ -697,9 +708,7 @@ def configure(st):
     if uuid_input:
         st['uuid'] = uuid_input
     
-    st['sni'] = ask("Primary SNI", st.get('sni', 'kind.sigs.k8s.io'))
-    st['alt_sni'] = ask("Alternative SNI", st.get('alt_sni', 'dl.google.com'))
-    st['secp'] = ask("Secret Path", st.get('secp', '/secpath-' + rhex(8)))
+    st['secp'] = ask("Secret Path", st.get('secp', '/nf-' + rhex(8)))
     
     save_st(st)
     print(f"\n  {grn(CHK)}  {grn('Configuration saved!')}")
@@ -752,10 +761,11 @@ def deploy_netlify(st):
         ip = get_ip()
         st['server_ip'] = ip
     
-    secp = st.get('secp', '/secpath-' + rhex(8))
+    secp = st.get('secp', '/nf-' + rhex(8))
+    if not secp.startswith('/'):
+        secp = '/' + secp
     st['secp'] = secp
     port = st.get('xray_port', 444)
-    sni = st.get('sni', 'kind.sigs.k8s.io')
     
     origin = f"http://{ip}:{port}"
     
@@ -764,12 +774,12 @@ def deploy_netlify(st):
     relay_js = RELAY_TPL.replace("__SECPATH__", secp).replace("__ORIGIN__", origin)
     toml_content = TOML_CFG.replace("__SECPATH__", secp)
     
-    site_name = f"dp-{rhex(8)}"
+    site_name = f"nf-{rhex(8)}"
     st['site_name'] = site_name
     
     print(f"  {icon_kv(SQR, 'Site Name', site_name)}")
     print(f"  {icon_kv(SQR, 'Origin', origin)}")
-    print(f"  {icon_kv(SQR, 'Secret Path', secp)}")
+    print(f"  {icon_kv(SQR, 'Secret Path', secp + '/')}")
     print()
     
     if not askyn("Proceed with deployment?", True):
@@ -779,23 +789,13 @@ def deploy_netlify(st):
     
     auth_header = {"Authorization": f"Bearer {token}"}
     
-    # Build ZIP in memory
-    print(f"  {cyn(DOT)}  {wht('Creating deployment package...')}")
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("public/index.html", FAKE_HTML_FILE)
-        zf.writestr("netlify/edge-functions/relay.js", relay_js)
-        zf.writestr("netlify.toml", toml_content)
-    zip_bytes = buf.getvalue()
-    print(f"  {grn(STR)}  {grn('Package created:')} {wht(f'{len(zip_bytes)} bytes')}")
-    
-    # Create site
-    print(f"  {cyn(DOT)}  {wht('Creating Netlify site...')}")
+    # Create Netlify site with SSO disabled
+    print(f"  {cyn(DOT)}  {wht('Creating Netlify site (SSO disabled)...')}")
     sp = spinner_start("Creating site...")
     try:
         req = urllib.request.Request(
             "https://api.netlify.com/api/v1/sites",
-            data=json.dumps({"name": site_name}).encode(),
+            data=json.dumps({"name": site_name, "sso_login": False}).encode(),
             headers={**auth_header, "Content-Type": "application/json"}
         )
         resp = json.loads(urllib.request.urlopen(req, timeout=30).read())
@@ -809,75 +809,143 @@ def deploy_netlify(st):
         pause()
         return st
     spinner_stop()
-    
     print(f"  {grn(STR)}  {grn('Site created:')} {wht(site_url)}")
-    print(f"  {cyn(DOT)}  {wht('Uploading deploy package...')}")
     
-    # Deploy ZIP
-    sp = spinner_start("Uploading...")
+    # Write deploy files to temp dir
+    work_dir = f"/tmp/netforge-deploy-{site_name}"
+    if os.path.exists(work_dir):
+        shutil.rmtree(work_dir)
+    os.makedirs(f"{work_dir}/netlify/edge-functions", exist_ok=True)
+    os.makedirs(f"{work_dir}/public", exist_ok=True)
+    
+    with open(f"{work_dir}/netlify/edge-functions/relay.js", "w") as f:
+        f.write(relay_js)
+    with open(f"{work_dir}/netlify.toml", "w") as f:
+        f.write(toml_content)
+    with open(f"{work_dir}/public/index.html", "w") as f:
+        f.write(FAKE_HTML_FILE)
+    
+    # Ensure Netlify CLI is available
+    netlify_cli = shutil.which("netlify")
+    if not netlify_cli:
+        print(f"  {ylw(chr(0x26a0))}  {ylw('Netlify CLI not found. Installing...')}")
+        # Ensure Node.js is available
+        if not shutil.which("node"):
+            print(f"  {cyn(DOT)}  {wht('Installing Node.js...')}")
+            subprocess.run(["bash", "-c", "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && apt-get install -y nodejs"],
+                           capture_output=True, timeout=120)
+        if not shutil.which("npm"):
+            print(f"  {red(CRS)}  {red('npm not available. Install Node.js first.')}")
+            pause()
+            return st
+        print(f"  {cyn(DOT)}  {wht('Installing netlify-cli...')}")
+        subprocess.run(["npm", "install", "-g", "netlify-cli"],
+                       capture_output=True, text=True, timeout=120)
+        if not shutil.which("netlify"):
+            print(f"  {red(CRS)}  {red('Netlify CLI install failed.')}")
+            pause()
+            return st
+        print(f"  {grn(STR)}  {grn('Netlify CLI installed!')}")
+
+    print(f"  {cyn(DOT)}  {wht('Deploying via Netlify CLI...')}")
+    sp = spinner_start("Deploying (bundling edge functions)...")
     try:
-        deploy_req = urllib.request.Request(
-            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
-            data=zip_bytes,
-            headers={**auth_header, "Content-Type": "application/zip"}
+        env = os.environ.copy()
+        env["NETLIFY_AUTH_TOKEN"] = token
+        result = subprocess.run(
+            ["netlify", "deploy", "--prod", f"--dir={work_dir}"],
+            capture_output=True, text=True, timeout=300, env=env
         )
-        deploy_resp = json.loads(urllib.request.urlopen(deploy_req, timeout=120).read())
-        deploy_id = deploy_resp["id"]
-        deploy_state = deploy_resp.get("state", "")
+        if result.returncode != 0:
+            spinner_stop()
+            print(f"  {red(CRS)}  {red('Deploy failed!')}")
+            out = result.stdout[-500:] if len(result.stdout) > 500 else result.stdout
+            print(f"  {dim(out)}")
+            if result.stderr:
+                err = result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
+                print(f"  {dim(err)}")
+            save_st(st)
+            pause()
+            return st
+        
+        # Extract URL from output
+        output = result.stdout
+        url_match = re.search(r'Production URL: <(https://[^>]+)>', output)
+        if url_match:
+            deployed_url = url_match.group(1)
+        else:
+            deployed_url = site_url
+        
+        if 'Edge Functions bundling' in output and 'completed' in output:
+            print(f"  {grn(STR)}  {grn('Edge functions bundled successfully!')}")
     except Exception as e:
         spinner_stop()
-        print(f"  {red(CRS)}  {red(f'Upload failed: {e}')}")
+        print(f"  {red(CRS)}  {red(f'Deploy error: {e}')}")
+        save_st(st)
         pause()
         return st
+    
     spinner_stop()
     
-    print(f"  {grn(STR)}  {grn('Package uploaded. Waiting for deploy...')}")
+    # Disable SSO again
+    try:
+        patch = urllib.request.Request(
+            f"https://api.netlify.com/api/v1/sites/{site_id}",
+            data=json.dumps({"sso_login": False}).encode(),
+            headers={**auth_header, "Content-Type": "application/json"},
+            method="PATCH"
+        )
+        urllib.request.urlopen(patch, timeout=10)
+    except: pass
     
-    # Poll deploy status (should be fast with ZIP)
-    sp = spinner_start("Deploying...")
-    built = False
-    for i in range(24):  # 120 seconds
-        time.sleep(5)
-        try:
-            check = urllib.request.Request(
-                f"https://api.netlify.com/api/v1/sites/{site_id}/deploys/{deploy_id}",
-                headers=auth_header
-            )
-            info = json.loads(urllib.request.urlopen(check, timeout=15).read())
-            state = info.get("state", "")
-            if state == "ready":
-                built = True
-                break
-            elif state == "error":
-                spinner_stop()
-                print(f"  {red(CRS)}  {red('Deploy failed!')}")
-                print(f"  {dim(str(info.get('error_message', '')))}")
-                save_st(st)
-                pause()
-                return st
-        except: pass
-    spinner_stop()
-    
-    # Save deployment info regardless
+    # Save deployment info
     dep = {
         "site_name": site_name,
         "site_id": site_id,
-        "site_url": site_url,
-        "deploy_id": deploy_id,
+        "site_url": deployed_url,
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     deps = st.get('deployments', [])
     deps.append(dep)
     st['deployments'] = deps
+    st['site_url'] = deployed_url
     save_st(st)
     
-    if built:
-        print(f"  {grn(CHK)}  {grn('Deployment successful!')}")
-        print(f"  {icon_kv(SQR, 'Site URL', site_url, val_color=mint)}")
-    else:
-        print(f"  {ylw('⚠')}  {ylw('Deploy timeout. Site created but may still be processing.')}")
-        print(f"  {dim('Check Netlify dashboard or try Generate VLESS Link later.')}")
+    # Quick test
+    print(f"  {cyn(DOT)}  {wht('Testing edge function...')}")
+    try:
+        test_req = urllib.request.Request(f"{deployed_url}/")
+        test_resp = urllib.request.urlopen(test_req, timeout=15)
+        test_code = test_resp.status
+        test_body = test_resp.read().decode()[:80]
+        if test_code == 200 and 'DevPulse' in test_body:
+            print(f"  {grn(CHK)}  {grn('Edge function is LIVE!')}")
+        elif test_code == 401:
+            print(f"  {ylw(chr(0x26a0))}  {ylw('SSO blocking - disabling...')}")
+            # Retry SSO disable with more fields
+            try:
+                patch = urllib.request.Request(
+                    f"https://api.netlify.com/api/v1/sites/{site_id}",
+                    data=json.dumps({"sso_login": False, "force_sso": False}).encode(),
+                    headers={**auth_header, "Content-Type": "application/json"},
+                    method="PATCH"
+                )
+                urllib.request.urlopen(patch, timeout=10)
+                time.sleep(3)
+                # Retry test
+                test_req2 = urllib.request.Request(f"{deployed_url}/")
+                test_resp2 = urllib.request.urlopen(test_req2, timeout=15)
+                if test_resp2.status == 200:
+                    print(f"  {grn(CHK)}  {grn('SSO disabled, site is LIVE!')}")
+            except: pass
+        else:
+            print(f"  {ylw(chr(0x26a0))}  {ylw(f'Test returned HTTP {test_code}')}")
+    except Exception as e:
+        print(f"  {ylw(chr(0x26a0))}  {ylw(f'Test failed: {e}')}")
     
+    print(f"  {grn(CHK)}  {grn('Deployment successful!')}")
+    print(f"  {icon_kv(SQR, 'Site URL', deployed_url, val_color=mint)}")
+    print(f"  {icon_kv(SQR, 'SecPath', secp + '/')}")
     pause()
     return st
 
@@ -893,11 +961,12 @@ def gen_vless(st):
         return
     
     uuid = st['uuid']
-    sni = st.get('sni', 'kind.sigs.k8s.io')
     secp = st.get('secp', '')
     site = st['site_url']
     # Strip protocol from site URL for host parameter
-    site_host = site.replace('https://', '').replace('http://', '')
+    site_host = site.replace('https://', '').replace('http://', '').rstrip('/')
+    # SNI must ALWAYS be the Netlify hostname for relay to work
+    sni = site_host
     ip = st.get('server_ip', '')
     port = st.get('xray_port', 444)
     
@@ -914,11 +983,11 @@ def gen_vless(st):
     }
     extra_encoded = urllib.parse.quote(json.dumps(extra_obj, separators=(',', ':')))
     
-    # Address = SNI domain, host param = Netlify site hostname (no protocol)
+    # Address = site's own domain, SNI = same
     link = (
-        f"vless://{uuid}@{sni}:443?"
-        f"type=xhttp&security=tls&sni={sni}"
-        f"&path={urllib.parse.quote(secp)}&mode=auto"
+        f"vless://{uuid}@{site_host}:443?"
+        f"type=xhttp&security=tls&sni={site_host}"
+        f"&path={urllib.parse.quote(secp + '/')}&mode=auto"
         f"&alpn=h2%2Chttp%2F1.1&encryption=none"
         f"&fp=chrome&insecure=0&allowInsecure=0"
         f"&host={site_host}"
@@ -928,23 +997,23 @@ def gen_vless(st):
     
     # Short version for QR
     link_short = (
-        f"vless://{uuid}@{sni}:443?"
-        f"type=xhttp&security=tls&sni={sni}"
-        f"&path={urllib.parse.quote(secp)}&mode=auto"
+        f"vless://{uuid}@{site_host}:443?"
+        f"type=xhttp&security=tls&sni={site_host}"
+        f"&path={urllib.parse.quote(secp + '/')}&mode=auto"
         f"&host={site_host}"
         f"&extra={extra_encoded}"
         f"#NetForge"
     )
     
     lines = [
-        f"{gold(DIA)}  {cyn('Address')}       {mint(sni)}",
+        f"{gold(DIA)}  {cyn('Address')}       {mint(site_host)}",
         f"{gold(DIA)}  {cyn('Host')}          {wht(site)}",
         f"{gold(DIA)}  {cyn('Port')}          {wht('443')}",
         f"{gold(DIA)}  {cyn('UUID')}          {dim(uuid[:18])}...",
         f"{gold(DIA)}  {cyn('Network')}       {wht('xhttp')}",
         f"{gold(DIA)}  {cyn('Security')}      {wht('tls')}",
-        f"{gold(DIA)}  {cyn('SNI')}           {wht(sni)}",
-        f"{gold(DIA)}  {cyn('Path')}          {wht(secp)}",
+        f"{gold(DIA)}  {cyn('SNI')}           {wht(site_host)}",
+        f"{gold(DIA)}  {cyn('Path')}          {wht(secp + '/')}",
         f"{gold(DIA)}  {cyn('Mode')}          {wht('auto')}",
         f"{gold(DIA)}  {cyn('xPadding')}      {grn('enabled')}",
         f"{gold(DIA)}  {cyn('x-host')}        {dim(f'{ip}:{port}')}",
@@ -1130,8 +1199,6 @@ def show_config(st):
         f"{gold(DIA)}  {cyn('UUID')}            {wht(st.get('uuid', ''))}",
         f"{gold(DIA)}  {cyn('Server IP')}       {wht(st.get('server_ip', ''))}",
         f"{gold(DIA)}  {cyn('Xray Port')}       {wht(str(st.get('xray_port', 444)))}",
-        f"{gold(DIA)}  {cyn('Primary SNI')}     {wht(st.get('sni', ''))}",
-        f"{gold(DIA)}  {cyn('Alt SNI')}         {silver(st.get('alt_sni', ''))}",
         f"{gold(DIA)}  {cyn('Secret Path')}     {wht(st.get('secp', ''))}",
         f"{gold(DIA)}  {cyn('Netlify Token')}   {mint('SET (' + st.get('netlify_token','')[:8] + '...)') if st.get('netlify_token') else red('NOT SET')}",
         f"{gold(DIA)}  {cyn('Site Name')}       {wht(st.get('site_name', ''))}",
@@ -1139,8 +1206,6 @@ def show_config(st):
         f"{gold(DIA)}  {cyn('Site ID')}         {dim(st.get('site_id', '')[:20] + '...' if st.get('site_id') else 'N/A')}",
         f"{gold(DIA)}  {cyn('Xray Version')}    {wht(st.get('xray_version', 'N/A'))}",
         f"{gold(DIA)}  {cyn('Xray Binary')}     {grn('/usr/local/xray/xray') if os.path.isfile(f'{XDIR}/xray') else red('Not found')}",
-        f"{gold(DIA)}  {cyn('TLS Cert')}        {grn('Present') if os.path.isfile(f'{XDIR}/cert.pem') else red('Missing')}",
-        f"{gold(DIA)}  {cyn('TLS Key')}         {grn('Present') if os.path.isfile(f'{XDIR}/key.pem') else red('Missing')}",
         f"{gold(DIA)}  {cyn('Deployments')}     {wht(str(len(st.get('deployments', []))))}",
     ]
     
