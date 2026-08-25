@@ -9,17 +9,11 @@ PY="$CDIR/manager.py"
 # Handle pipe/fd execution (bash <(curl ...) or curl | bash)
 case "$SELF" in
   /dev/fd/*|/proc/*/fd/*|bash|""|-bash)
-    SAVED=0
-    if [ -r "$SELF" ]; then
-      SCRIPT_FILE="$CDIR/deploy.sh"
-      cp "$SELF" "$SCRIPT_FILE" 2>/dev/null && [ -s "$SCRIPT_FILE" ] && SAVED=1
-    fi
-    if [ "$SAVED" = "0" ]; then
-      echo "  Downloading script to file..."
-      SCRIPT_FILE="$CDIR/deploy.sh"
-      curl -sL "https://raw.githubusercontent.com/166gkhdbn-boop/NetForge/main/deploy.sh" -o "$SCRIPT_FILE" || { echo "  Download failed"; exit 1; }
-    fi
-    SELF="$SCRIPT_FILE"
+    # Piped execution - always download fresh copy from GitHub
+    # (cp from fd is unreliable as the fd may be drained)
+    echo "  Downloading script to file..."
+    SELF="$CDIR/deploy.sh"
+    curl -sL "https://raw.githubusercontent.com/166gkhdbn-boop/NetForge/main/deploy.sh" -o "$SELF" || { echo "  Download failed"; exit 1; }
     ;;
 esac
 
