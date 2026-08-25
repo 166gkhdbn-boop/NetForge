@@ -1,4 +1,4 @@
-const SP="/nf-62cafc87";
+const SP="/nf-0a3daaa6";
 const FAKE_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>DevPulse</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#0a0e1a;color:#c8d6e5;display:flex;justify-content:center;align-items:center;height:100vh}h1{background:linear-gradient(90deg,#00d4ff,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:2rem}</style></head><body><h1>DevPulse Analytics</h1></body></html>`;
 
 export default async (request, context) => {
