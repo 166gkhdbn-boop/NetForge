@@ -3,11 +3,11 @@
 
 [[edge_functions]]
   function = "relay"
-  path = "/nf-0a3daaa6"
+  path = "/nf-d94e3af0"
 
 [[edge_functions]]
   function = "relay"
-  path = "/nf-0a3daaa6/*"
+  path = "/nf-d94e3af0/*"
 
 [[edge_functions]]
   function = "relay"
