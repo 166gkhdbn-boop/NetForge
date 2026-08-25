@@ -1,25 +1,30 @@
 #!/bin/bash
-# ╔══════════════════════════════════════════════════════════════╗
-# ║  NetForge VLESS - XHTTP/Netlify Relay Manager               ║
-# ║  Single-file deployment script                               ║
-# ║  Usage: bash deploy.sh                                      ║
-# ╚══════════════════════════════════════════════════════════════╝
-SELF="$0"
+# NetForge VLESS - XHTTP/Netlify Relay Manager
+# Single-file deployment script
 CDIR="$HOME/.vless-netlify"
 mkdir -p "$CDIR"
+SELF="$0"
 PY="$CDIR/manager.py"
 
 # Handle pipe/fd execution (bash <(curl ...) or curl | bash)
 case "$SELF" in
   /dev/fd/*|/proc/*/fd/*|bash|""|-bash)
-    echo "  Downloading script to file..."
-    SELF="$CDIR/deploy.sh"
-    curl -sL "https://raw.githubusercontent.com/166gkhdbn-boop/NetForge/main/deploy.sh" -o "$SELF" || { echo "  Download failed"; exit 1; }
+    SAVED=0
+    if [ -r "$SELF" ]; then
+      SCRIPT_FILE="$CDIR/deploy.sh"
+      cp "$SELF" "$SCRIPT_FILE" 2>/dev/null && [ -s "$SCRIPT_FILE" ] && SAVED=1
+    fi
+    if [ "$SAVED" = "0" ]; then
+      echo "  Downloading script to file..."
+      SCRIPT_FILE="$CDIR/deploy.sh"
+      curl -sL "https://raw.githubusercontent.com/166gkhdbn-boop/NetForge/main/deploy.sh" -o "$SCRIPT_FILE" || { echo "  Download failed"; exit 1; }
+    fi
+    SELF="$SCRIPT_FILE"
     ;;
 esac
 
 if [ ! -f "$PY" ] || [ "$SELF" -nt "$PY" ]; then
-  sed -n "/^__PYBOT__/,\$ p" "$SELF" | sed "1d" > "$PY"
+  sed -n '/^__PYBOT__/,$ p' "$SELF" | sed '1d' > "$PY"
 fi
 exec python3 "$PY" "$@"
 
@@ -33,6 +38,9 @@ __PYBOT__
 
 import json, urllib.parse, urllib.request, time, random, os, sys
 import subprocess, textwrap, shutil, re, math, threading, zipfile, io
+
+# Global auto mode flag
+AUTO_MODE = False
 
 # ═══════════════════════════════════════════════════════════
 #  COLOR SYSTEM  —  256-color xterm palette
@@ -296,6 +304,8 @@ def spinner_stop():
 #  INPUT HELPERS
 # ═══════════════════════════════════════════════════════════
 def ask(prompt, default=""):
+    if AUTO_MODE:
+        return default
     if default:
         hint = dim(f"  [{default}]")
         rv = input(f"  {cyn(ARR)} {wht(prompt)} {hint}: ").strip()
@@ -306,12 +316,16 @@ def ask(prompt, default=""):
     return rv
 
 def askyn(prompt, default=True):
+    if AUTO_MODE:
+        return default
     hint = dim("[Y/n]") if default else dim("[y/N]")
     rv = input(f"  {cyn(ARR)} {wht(prompt)} {hint} ").strip().lower()
     if not rv: return default
     return rv in ("y", "yes", "1", "بله")
 
 def pause(msg="Press Enter to continue..."):
+    if AUTO_MODE:
+        return
     input(f"\n  {dim(T * 40)}\n  {gry(msg)}  ")
 
 def choose(prompt, options, width=62):
@@ -319,6 +333,9 @@ def choose(prompt, options, width=62):
     options: list of (key, label, hint)
     Returns selected key or None for back/0.
     """
+    if AUTO_MODE:
+        # Return first option key in auto mode
+        return options[0][0] if options else None
     # Calculate max label width for alignment
     max_label = max(_vw(lbl) for _, lbl, _ in options) if options else 10
     
@@ -392,7 +409,29 @@ def banner():
 # ═══════════════════════════════════════════════════════════
 SDIR = os.path.expanduser("~/.vless-netlify")
 SFILE = os.path.join(SDIR, "config.json")
-XDIR = "/usr/local/xray"
+# Xray binary search order
+XRAY_SEARCH_PATHS = ["/usr/local/bin/xray", "/usr/local/xray/xray", "/usr/bin/xray"]
+
+def find_xray_bin():
+    for p in XRAY_SEARCH_PATHS:
+        if os.path.isfile(p):
+            try:
+                subprocess.run([p, "version"], capture_output=True, timeout=5)
+                return p
+            except: pass
+    return None
+
+def get_xray_paths(xbin):
+    """Return (bin_path, cfg_dir, cfg_file) based on where xray binary is."""
+    if xbin and "/usr/local/xray/" in xbin:
+        return xbin, "/usr/local/xray", "/usr/local/xray/config.json"
+    return "/usr/local/bin/xray", "/usr/local/etc/xray", "/usr/local/etc/xray/config.json"
+
+# Defaults (will be updated after detection)
+XBIN = "/usr/local/bin/xray"
+XCFG_DIR = "/usr/local/etc/xray"
+XCFG = os.path.join(XCFG_DIR, "config.json")
+XDIR = XCFG_DIR  # legacy compat
 
 def rhex(n): return ''.join(random.choices('0123456789abcdef', k=n))
 def guuid(): return f"{rhex(8)}-{rhex(4)}-4{rhex(3)}-{rhex(1)}{rhex(3)}-{rhex(12)}"
@@ -451,76 +490,88 @@ def show_status(st):
 # ═══════════════════════════════════════════════════════════
 #  XRAY INSTALLATION
 # ═══════════════════════════════════════════════════════════
+def _detect_xray():
+    """Detect existing Xray installation. Returns (bin_path, version_str) or (None, None)."""
+    for p in XRAY_SEARCH_PATHS:
+        if os.path.isfile(p):
+            try:
+                r = subprocess.run([p, "version"], capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    ver = r.stdout.strip().split("\n")[0] if r.stdout else "unknown"
+                    return p, ver
+            except: pass
+    return None, None
+
 def install_xray(st):
+    global XBIN, XCFG_DIR, XCFG, XDIR
     print(f"\n  {section_divider('XRAY INSTALLATION')}\n")
     
-    if st.get('xray_installed') and os.path.isfile(f"{XDIR}/xray"):
+    # Detect existing Xray
+    xbin, xver = _detect_xray()
+    
+    if xbin and st.get('xray_installed'):
         if not askyn("Xray is already installed. Reinstall?", False):
-            print(f"  {gry('Cancelled.')}")
-            pause()
+            if AUTO_MODE:
+                print(f"  {grn(CHK)}  {grn(f'Xray found at {xbin}, skipping install.')}")
+            else:
+                print(f"  {gry('Cancelled.')}")
+                pause()
+            # Update global paths to match detected location
+            XBIN, XCFG_DIR, XCFG = get_xray_paths(xbin)
+            XDIR = XCFG_DIR
             return st
     
-    print(f"  {cyn(DOT)}  {wht('Detecting latest Xray release...')}")
+    print(f"  {cyn(DOT)}  {wht('Installing Xray using official install script...')}")
     
     try:
-        req = urllib.request.Request(
-            "https://api.github.com/repos/XTLS/Xray-core/releases/latest",
-            headers={"User-Agent": "NetForge/2.0"}
-        )
-        data = json.loads(urllib.request.urlopen(req, timeout=15).read())
-        tag = data["tag_name"]
+        # Stop any existing xray service first
+        subprocess.run(["systemctl", "stop", "xray"], capture_output=True, timeout=10)
+        subprocess.run(["systemctl", "disable", "xray"], capture_output=True, timeout=10)
         
-        # Find linux 64-bit asset
-        asset = None
-        for a in data.get("assets", []):
-            name = a["name"].lower()
-            if "linux" in name and "64" in name and name.endswith(".zip") and "arm" not in name and "mips" not in name and "loong" not in name and "ppc" not in name and "riscv" not in name and "s390" not in name:
-                asset = a
-                break
-        if not asset:
-            print(f"  {red(CRS)}  {red('Could not find suitable release asset.')}")
+        # Use official Xray install script - it handles binary, config dir, and systemd
+        sp = spinner_start("Installing Xray...")
+        result = subprocess.run(
+            ["bash", "-c", "bash <(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install 2>&1"],
+            capture_output=True, text=True, timeout=180
+        )
+        spinner_stop()
+        
+        if result.returncode != 0:
+            print(f"  {dim(result.stdout[-300:] if result.stdout else '')}")
+            print(f"  {dim(result.stderr[-200:] if result.stderr else '')}")
+            # Fallback: check if xray binary exists anyway
+            xbin2, _ = _detect_xray()
+            if not xbin2:
+                print(f"  {red(CRS)}  {red('Official install failed and no Xray binary found.')}")
+                pause()
+                return st
+            print(f"  {ylw(chr(0x26a0))}  {ylw('Install script had errors but Xray binary found.')}")
+        
+        # Detect where Xray was installed
+        xbin, xver = _detect_xray()
+        if not xbin:
+            print(f"  {red(CRS)}  {red('Xray binary not found after install.')}")
             pause()
             return st
         
-        url = asset["browser_download_url"]
-        print(f"  {grn(STR)}  {grn('Found:')} {wht(tag)}")
-        print(f"  {cyn(DOT)}  {wht('Downloading...')}")
+        # Update global paths
+        XBIN, XCFG_DIR, XCFG = get_xray_paths(xbin)
+        XDIR = XCFG_DIR
         
-        sp = spinner_start(f"Downloading {asset['name']}")
-        tmp = "/tmp/xray-install.zip"
-        try:
-            urllib.request.urlretrieve(url, tmp)
-        finally:
-            spinner_stop()
+        # Ensure config directory exists
+        os.makedirs(XCFG_DIR, exist_ok=True)
         
-        print(f"  {grn(STR)}  {grn('Download complete. Extracting...')}")
-        
-        os.makedirs(XDIR, exist_ok=True)
-        import zipfile
-        with zipfile.ZipFile(tmp, 'r') as zf:
-            zf.extractall('/tmp/xray-extract')
-        # Find xray binary and copy
-        import glob as _glob, shutil as _shutil
-        for xb in _glob.glob('/tmp/xray-extract/**/xray', recursive=True):
-            _shutil.copy2(xb, f'{XDIR}/xray')
-            break
-        os.chmod(f'{XDIR}/xray', 0o755)
-        subprocess.run(['rm', '-rf', '/tmp/xray-extract', tmp], capture_output=True)
-        
-        # Test binary
-        ver_out = subprocess.run([f"{XDIR}/xray", "version"], capture_output=True, text=True, timeout=10)
-        ver_line = ver_out.stdout.strip().split("\n")[0] if ver_out.stdout else tag
-        
-        # Create systemd service
+        # Create our own systemd service (overwrite any existing)
         svc = f"""[Unit]
 Description=Xray Service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart={XDIR}/xray run -config {XDIR}/config.json
+ExecStart={XBIN} run -config {XCFG}
 Restart=on-failure
 RestartSec=5
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -528,14 +579,22 @@ WantedBy=multi-user.target
         with open("/etc/systemd/system/xray.service", "w") as f:
             f.write(svc)
         
+        # Remove any leftover drop-in overrides from official script
+        dropin = "/etc/systemd/system/xray.service.d"
+        if os.path.isdir(dropin):
+            shutil.rmtree(dropin)
+        
         subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=10)
+        subprocess.run(["systemctl", "enable", "xray"], capture_output=True, timeout=10)
         
         st["xray_installed"] = True
-        st["xray_version"] = ver_line
+        st["xray_version"] = xver
         save_st(st)
         
         print(f"  {grn(CHK)}  {grn('Xray installed successfully!')}")
-        print(f"  {gry(f'  Version: {ver_line}')}")
+        print(f"  {gry(f'  Binary: {XBIN}')}")
+        print(f"  {gry(f'  Config: {XCFG}')}")
+        print(f"  {gry(f'  Version: {xver}')}")
         
     except Exception as e:
         print(f"  {red(CRS)}  {red(f'Install failed: {e}')}")
@@ -602,14 +661,25 @@ TOML_CFG = r"""[build]
 FAKE_HTML_FILE = r"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DevPulse - Developer Analytics</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e1a;color:#c8d6e5;line-height:1.6}header{background:linear-gradient(135deg,#0f1729,#1a1f35);padding:2rem;text-align:center;border-bottom:1px solid #1e2d4a}.logo{font-size:2rem;font-weight:700;background:linear-gradient(90deg,#00d4ff,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}nav{display:flex;justify-content:center;gap:2rem;padding:1rem;background:#0d1220}nav a{color:#8892b0;text-decoration:none;font-size:.9rem}nav a:hover{color:#00d4ff}.hero{padding:4rem 2rem;text-align:center;max-width:800px;margin:0 auto}.hero h2{font-size:2.5rem;margin-bottom:1rem;color:#e6f1ff}.hero p{color:#8892b0;font-size:1.1rem;max-width:600px;margin:0 auto 2rem}.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:2rem;padding:3rem 2rem;max-width:1000px;margin:0 auto}.feature{background:#111827;border:1px solid #1e2d4a;border-radius:8px;padding:1.5rem;transition:transform .2s}.feature:hover{transform:translateY(-2px)}.feature h3{color:#00d4ff;margin-bottom:.5rem}.feature p{color:#8892b0;font-size:.9rem}footer{text-align:center;padding:2rem;color:#4a5568;font-size:.8rem;border-top:1px solid #1e2d4a}</style></head><body><header><div class="logo">DevPulse</div><p style="color:#64ffda;margin-top:.5rem">Real-time developer analytics platform</p></header><nav><a href="#">Dashboard</a><a href="#">Analytics</a><a href="#">Monitoring</a><a href="#">Docs</a></nav><section class="hero"><h2>Monitor. Analyze. Optimize.</h2><p>Powerful developer analytics and monitoring for modern applications. Track performance metrics in real-time.</p><button style="background:linear-gradient(135deg,#00d4ff,#7c3aed);color:#fff;border:none;padding:.75rem 2rem;border-radius:6px;font-size:1rem;cursor:pointer">Get Started Free</button></section><section class="features"><div class="feature"><h3>Real-time Metrics</h3><p>Monitor application performance with sub-second granularity and custom dashboards.</p></div><div class="feature"><h3>Error Tracking</h3><p>Capture and analyze errors with full stack traces and contextual information.</p></div><div class="feature"><h3>API Analytics</h3><p>Track API response times, throughput, and error rates across all endpoints.</p></div></section><footer>DevPulse Analytics Platform &copy; 2025</footer></body></html>"""
 
 def gen_xray_cfg(st):
+    global XBIN, XCFG_DIR, XCFG, XDIR
+    # Re-detect xray location in case it was installed after script load
+    xbin, _ = _detect_xray()
+    if xbin:
+        XBIN, XCFG_DIR, XCFG = get_xray_paths(xbin)
+        XDIR = XCFG_DIR
+    
     ip = st["server_ip"] or "0.0.0.0"
     port = st.get("xray_port", 444)
     uuid = st["uuid"]
     secp = st.get("secp", "/nf-" + rhex(8))
     st["secp"] = secp
     
-    # Check if real TLS certs exist
-    has_certs = os.path.isfile(f"{XDIR}/cert.pem") and os.path.isfile(f"{XDIR}/key.pem")
+    # Check if real TLS certs exist (check both possible locations)
+    has_certs = False
+    for cert_dir in [XCFG_DIR, "/usr/local/xray", "/etc/ssl/xray"]:
+        if os.path.isfile(f"{cert_dir}/cert.pem") and os.path.isfile(f"{cert_dir}/key.pem"):
+            has_certs = True
+            break
     
     stream = {
         "network": "xhttp",
@@ -667,7 +737,7 @@ def gen_xray_cfg(st):
         }]
     }
     
-    cfg_path = f"{XDIR}/config.json"
+    cfg_path = XCFG
     os.makedirs(XDIR, exist_ok=True)
     with open(cfg_path, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -833,14 +903,32 @@ def deploy_netlify(st):
         if not shutil.which("node"):
             print(f"  {cyn(DOT)}  {wht('Installing Node.js...')}")
             subprocess.run(["bash", "-c", "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && apt-get install -y nodejs"],
-                           capture_output=True, timeout=120)
+                           capture_output=True, timeout=180)
         if not shutil.which("npm"):
             print(f"  {red(CRS)}  {red('npm not available. Install Node.js first.')}")
             pause()
             return st
-        print(f"  {cyn(DOT)}  {wht('Installing netlify-cli...')}")
-        subprocess.run(["npm", "install", "-g", "netlify-cli"],
-                       capture_output=True, text=True, timeout=120)
+        # Add swap if memory is low (< 1.5GB free)
+        try:
+            mem_out = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5).stdout
+            for line in mem_out.split("\n"):
+                if "Mem:" in line:
+                    parts = line.split()
+                    free_mb = int(parts[6]) if len(parts) > 6 else 9999
+                    if free_mb < 1500:
+                        print(f"  {cyn(DOT)}  {wht('Adding swap space for npm...')}")
+                        subprocess.run(["bash", "-c", "fallocate -l 1G /swapfile 2>/dev/null && chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile"],
+                                       capture_output=True, timeout=30)
+                        break
+        except: pass
+        print(f"  {cyn(DOT)}  {wht('Installing netlify-cli (this may take a few minutes)...')}")
+        sp = spinner_start("Installing netlify-cli...")
+        result = subprocess.run(["npm", "install", "-g", "netlify-cli@17.36.4", "--no-audit", "--no-fund"],
+                       capture_output=True, text=True, timeout=300)
+        spinner_stop()
+        if result.returncode != 0:
+            print(f"  {dim(result.stdout[-300:] if result.stdout else '')}")
+            print(f"  {dim(result.stderr[-200:] if result.stderr else '')}")
         if not shutil.which("netlify"):
             print(f"  {red(CRS)}  {red('Netlify CLI install failed.')}")
             pause()
@@ -852,9 +940,11 @@ def deploy_netlify(st):
     try:
         env = os.environ.copy()
         env["NETLIFY_AUTH_TOKEN"] = token
+        # Must cd into work_dir so netlify.toml is found for edge function bundling
         result = subprocess.run(
-            ["netlify", "deploy", "--prod", f"--dir={work_dir}"],
-            capture_output=True, text=True, timeout=300, env=env
+            ["netlify", "deploy", "--prod", "--dir=.", f"--site={site_id}"],
+            capture_output=True, text=True, timeout=300, env=env,
+            cwd=work_dir
         )
         if result.returncode != 0:
             spinner_stop()
@@ -917,7 +1007,7 @@ def deploy_netlify(st):
         test_req = urllib.request.Request(f"{deployed_url}/")
         test_resp = urllib.request.urlopen(test_req, timeout=15)
         test_code = test_resp.status
-        test_body = test_resp.read().decode()[:80]
+        test_body = test_resp.read().decode()[:500]
         if test_code == 200 and 'DevPulse' in test_body:
             print(f"  {grn(CHK)}  {grn('Edge function is LIVE!')}")
         elif test_code == 401:
@@ -1032,6 +1122,12 @@ def gen_vless(st):
     for i, chunk in enumerate(textwrap.wrap(link_short, 76)):
         print(f"  {silver(chunk)}")
     
+    # In auto mode, print raw link for easy copying
+    if AUTO_MODE:
+        print(f"\n{link}")
+        st['last_link'] = link
+        save_st(st)
+    
     pause()
 
 # ═══════════════════════════════════════════════════════════
@@ -1125,7 +1221,8 @@ def manage_deps(st):
 def xray_menu(st):
     print(f"\n  {section_divider('XRAY SERVICE')}\n")
     
-    installed = os.path.isfile(f"{XDIR}/xray")
+    xbin_detected = _detect_xray()[0]
+    installed = xbin_detected is not None
     
     try:
         status = subprocess.run(["systemctl", "is-active", "xray"], capture_output=True, text=True, timeout=5).stdout.strip()
@@ -1205,7 +1302,7 @@ def show_config(st):
         f"{gold(DIA)}  {cyn('Site URL')}        {mint(st.get('site_url', '')) if st.get('site_url') else red('N/A')}",
         f"{gold(DIA)}  {cyn('Site ID')}         {dim(st.get('site_id', '')[:20] + '...' if st.get('site_id') else 'N/A')}",
         f"{gold(DIA)}  {cyn('Xray Version')}    {wht(st.get('xray_version', 'N/A'))}",
-        f"{gold(DIA)}  {cyn('Xray Binary')}     {grn('/usr/local/xray/xray') if os.path.isfile(f'{XDIR}/xray') else red('Not found')}",
+        f"{gold(DIA)}  {cyn('Xray Binary')}     {grn(_detect_xray()[0] or 'Not found')}",
         f"{gold(DIA)}  {cyn('Deployments')}     {wht(str(len(st.get('deployments', []))))}",
     ]
     
@@ -1280,12 +1377,110 @@ def main_menu(st):
         st = load_st()  # Refresh state
 
 # ═══════════════════════════════════════════════════════════
+#  AUTO SETUP — fully non-interactive
+# ═══════════════════════════════════════════════════════════
+def auto_setup(token):
+    global AUTO_MODE, XBIN, XCFG_DIR, XCFG, XDIR
+    AUTO_MODE = True
+
+    print(banner())
+    st = load_st()
+
+    # 1. Set token
+    print(f"\n  {section_divider('AUTO SETUP - STEP 1/5: SET TOKEN')}")
+    st['netlify_token'] = token.strip()
+    save_st(st)
+    print(f"  {grn(CHK)}  {grn('Token set successfully!')}")
+
+    # 2. Install Xray
+    st = install_xray(st)
+    if not st.get('xray_installed'):
+        print(f"  {red(CRS)}  {red('Xray installation failed, aborting.')}")
+        return
+
+    # Re-detect Xray paths after install
+    xbin, _ = _detect_xray()
+    if xbin:
+        XBIN, XCFG_DIR, XCFG = get_xray_paths(xbin)
+        XDIR = XCFG_DIR
+    print(f"  {gry(f'  Xray binary: {XBIN}')}")
+    print(f"  {gry(f'  Config path: {XCFG}')}")
+
+    # 3. Generate Xray config & start service
+    print(f"\n  {section_divider('AUTO SETUP - STEP 2/5: GENERATE CONFIG')}")
+    cfg_path = gen_xray_cfg(st)
+    save_st(st)
+    print(f"  {grn(CHK)}  {grn(f'Config written: {cfg_path}')}")
+
+    # Open firewall (iptables + ufw if available)
+    port = st.get('xray_port', 444)
+    subprocess.run(['iptables', '-I', 'INPUT', '-p', 'tcp', '--dport', str(port), '-j', 'ACCEPT'], capture_output=True, timeout=10)
+    try:
+        subprocess.run(['ufw', 'allow', str(port) + '/tcp'], capture_output=True, timeout=10)
+    except FileNotFoundError:
+        pass
+    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+    subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True, timeout=10)
+    subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=10)
+    
+    # Verify Xray is running
+    time.sleep(1)
+    xstatus = subprocess.run(["systemctl", "is-active", "xray"], capture_output=True, text=True, timeout=5).stdout.strip()
+    if xstatus == 'active':
+        print(f"  {grn(CHK)}  {grn(f'Xray is running on port {port}')}")
+    else:
+        print(f"  {ylw(chr(0x26a0))}  {ylw(f'Xray status: {xstatus} - checking logs...')}")
+        logs = subprocess.run(["journalctl", "-u", "xray", "--no-pager", "-n", "10"], capture_output=True, text=True, timeout=5).stdout
+        print(f"  {dim(logs[-500:] if logs else 'No logs')}")
+
+    # 4. Deploy to Netlify
+    print(f"\n  {section_divider('AUTO SETUP - STEP 3/5: NETLIFY DEPLOY')}")
+    st = deploy_netlify(st)
+    if not st.get('site_url'):
+        print(f"  {red(CRS)}  {red('Deployment failed, aborting.')}")
+        return
+
+    # 5. Generate VLESS link
+    print(f"\n  {section_divider('AUTO SETUP - STEP 4/5: GENERATE LINK')}")
+    gen_vless(st)
+
+    print(f"\n  {section_divider('AUTO SETUP - COMPLETE')}")
+    print(f"  {grn(CHK)}  {grn('All done! Your VLESS link is ready above.')}")
+    print(f"  {gry('Run again without --auto for interactive menu.')}")
+    print()
+
+# ═══════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════
 if __name__ == "__main__":
     try:
-        st = load_st()
-        main_menu(st)
+        # Parse command line args
+        args = sys.argv[1:]
+        token_arg = None
+        auto = False
+        i = 0
+        while i < len(args):
+            if args[i] in ('--token', '-t') and i + 1 < len(args):
+                token_arg = args[i + 1]
+                i += 2
+            elif args[i] == '--auto' or args[i] == '-a':
+                auto = True
+                i += 1
+            elif args[i] == '--token=':
+                # --token=TOKEN format
+                token_arg = args[i].split('=', 1)[1]
+                i += 1
+            else:
+                i += 1
+
+        if auto:
+            if not token_arg:
+                print(f"  {red(CRS)}  {red('Error: --auto requires --token <TOKEN>')}")
+                sys.exit(1)
+            auto_setup(token_arg)
+        else:
+            st = load_st()
+            main_menu(st)
     except KeyboardInterrupt:
         print(f"\n\n  {gry('Interrupted. Goodbye!')}")
     except Exception as e:
