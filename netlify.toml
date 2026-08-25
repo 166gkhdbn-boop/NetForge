@@ -1,0 +1,14 @@
+[build]
+  publish = "public"
+
+[[edge_functions]]
+  function = "relay"
+  path = "/nf-62cafc87"
+
+[[edge_functions]]
+  function = "relay"
+  path = "/nf-62cafc87/*"
+
+[[edge_functions]]
+  function = "relay"
+  path = "/"
