@@ -1,0 +1,14 @@
+[build]
+  publish = "public"
+
+[[edge_functions]]
+  function = "relay"
+  path = "/nf-REDACTED"
+
+[[edge_functions]]
+  function = "relay"
+  path = "/nf-REDACTED/*"
+
+[[edge_functions]]
+  function = "relay"
+  path = "/"
