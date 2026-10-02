@@ -30,7 +30,7 @@ __PYBOT__
 ╚═══════════════════════════════════════════════════════════╝
 """
 
-import json, urllib.parse, urllib.request, time, random, os, sys
+import json, urllib.parse, urllib.request, time, secrets, uuid, os, sys
 import subprocess, textwrap, shutil, re, math, threading, zipfile, io
 
 # Global auto mode flag
@@ -374,7 +374,7 @@ def banner():
         ]
     
     sub = centered(f"{silver(STR)} {italic('XHTTP/Netlify Relay Manager')} {silver(STR)}", w - 4)
-    ver = centered(dim(f"v2.0  |  by NetForge  |  Stealth Networking Tools"), w - 4)
+    ver = centered(dim(f"v2.1  |  by NetForge  |  Stealth Networking Tools"), w - 4)
     
     max_art = max(len(l) for l in art_lines)
     indent = (w - max_art - 4) // 2
@@ -427,8 +427,8 @@ XCFG_DIR = "/usr/local/etc/xray"
 XCFG = os.path.join(XCFG_DIR, "config.json")
 XDIR = XCFG_DIR  # legacy compat
 
-def rhex(n): return ''.join(random.choices('0123456789abcdef', k=n))
-def guuid(): return f"{rhex(8)}-{rhex(4)}-4{rhex(3)}-{rhex(1)}{rhex(3)}-{rhex(12)}"
+def rhex(n): return ''.join(secrets.choice('0123456789abcdef') for _ in range(n))
+def guuid(): return str(uuid.uuid4())
 
 def get_ip():
     for u in ["https://api.ipify.org?format=text", "https://ifconfig.me/ip"]:
@@ -460,6 +460,11 @@ def load_st():
 def save_st(dd):
     os.makedirs(SDIR, exist_ok=True)
     with open(SFILE, "w") as f: json.dump(dd, f, indent=2, ensure_ascii=False)
+    # Config holds the Netlify token + UUID: readable only by the owner
+    try:
+        os.chmod(SFILE, 0o600)
+    except OSError:
+        pass
 
 def show_status(st):
     tw = _tw()
@@ -480,6 +485,38 @@ def show_status(st):
     print(f"\n  {header}")
     print()
     print(double_box(lines, w, title="Overview", title_color=C.GOLD, border_color=C.TEAL))
+
+# ═══════════════════════════════════════════════════════════
+#  NETWORK PERFORMANCE TUNING  —  BBR + fq + socket buffers
+# ═══════════════════════════════════════════════════════════
+def tune_network():
+    """Enable BBR congestion control and raise socket buffers for throughput.
+    Best-effort: silently skips anything the kernel does not support."""
+    print(f"\n  {section_divider('NETWORK TUNING')}\n")
+    conf = (
+        "# NetForge performance tuning\n"
+        "net.ipv4.tcp_congestion_control = bbr\n"
+        "net.core.default_qdisc = fq\n"
+        "net.ipv4.tcp_fastopen = 3\n"
+        "net.core.rmem_max = 67108864\n"
+        "net.core.wmem_max = 67108864\n"
+        "net.ipv4.tcp_rmem = 4096 87380 67108864\n"
+        "net.ipv4.tcp_wmem = 4096 65536 67108864\n"
+        "net.core.somaxconn = 4096\n"
+    )
+    try:
+        with open("/etc/sysctl.d/99-netforge.conf", "w") as f:
+            f.write(conf)
+        subprocess.run(["sysctl", "--system"], capture_output=True, timeout=15)
+        r = subprocess.run(["sysctl", "-n", "net.ipv4.tcp_congestion_control"],
+                           capture_output=True, text=True, timeout=5)
+        if "bbr" in r.stdout:
+            print(f"  {grn(CHK)}  {grn('BBR congestion control enabled (better throughput on lossy links)')}")
+        else:
+            print(f"  {ylw(chr(0x26a0))}  {ylw('BBR not available on this kernel - skipped (other tunings applied)')}")
+        print(f"  {grn(CHK)}  {grn('Socket buffers raised to 64MB max (better for high-bandwidth links)')}")
+    except Exception as e:
+        print(f"  {ylw(chr(0x26a0))}  {ylw(f'Network tuning skipped: {e}')}")
 
 # ═══════════════════════════════════════════════════════════
 #  XRAY INSTALLATION
@@ -566,6 +603,11 @@ ExecStart={XBIN} run -config {XCFG}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
+# Sandboxing: Xray only needs to read its config and serve traffic
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
@@ -584,7 +626,10 @@ WantedBy=multi-user.target
         st["xray_installed"] = True
         st["xray_version"] = xver
         save_st(st)
-        
+
+        # Throughput tuning (BBR etc.) — best-effort, safe to skip on failure
+        tune_network()
+
         print(f"  {grn(CHK)}  {grn('Xray installed successfully!')}")
         print(f"  {gry(f'  Binary: {XBIN}')}")
         print(f"  {gry(f'  Config: {XCFG}')}")
@@ -620,6 +665,8 @@ export default async (request, context) => {
     const opts = {method: request.method, headers};
     if (!["GET", "HEAD"].includes(request.method)) {
       opts.body = request.body;
+      // Allow the request body to stream (faster uploads, lower memory)
+      opts.duplex = "half";
     }
 
     try {
@@ -668,16 +715,13 @@ def gen_xray_cfg(st):
     secp = st.get("secp", "/nf-" + rhex(8))
     st["secp"] = secp
     
-    # Check if real TLS certs exist (check both possible locations)
-    has_certs = False
-    for cert_dir in [XCFG_DIR, "/usr/local/xray", "/etc/ssl/xray"]:
-        if os.path.isfile(f"{cert_dir}/cert.pem") and os.path.isfile(f"{cert_dir}/key.pem"):
-            has_certs = True
-            break
-    
+    # NOTE: the Netlify edge function always dials the origin over plain HTTP,
+    # so the inbound MUST stay on "none". Switching this to "tls" would break
+    # the relay (and no public CA issues certificates for a bare IP anyway).
+    # See SECURITY.md for the full threat model of the Netlify -> VPS hop.
     stream = {
         "network": "xhttp",
-        "security": "tls" if has_certs else "none",
+        "security": "none",
         "xhttpSettings": {
             "path": secp + "/",
             "mode": "auto",
@@ -690,17 +734,6 @@ def gen_xray_cfg(st):
             }
         }
     }
-    
-    if has_certs:
-        stream["tlsSettings"] = {
-            "certificates": [{
-                "certificateFile": f"{XDIR}/cert.pem",
-                "keyFile": f"{XDIR}/key.pem"
-            }],
-            "minVersion": "1.3",
-            "alpn": ["h2", "http/1.1"],
-            "fingerprint": "chrome"
-        }
     
     cfg = {
         "log": {"loglevel": "warning"},
@@ -735,8 +768,12 @@ def gen_xray_cfg(st):
     os.makedirs(XDIR, exist_ok=True)
     with open(cfg_path, "w") as f:
         json.dump(cfg, f, indent=2)
-    
-    st["tls_enabled"] = has_certs
+    # Xray config holds the client UUID: readable only by the owner
+    try:
+        os.chmod(cfg_path, 0o600)
+    except OSError:
+        pass
+
     return cfg_path
 
 def configure(st):
@@ -761,14 +798,20 @@ def configure(st):
     if ip == 'auto': ip = get_ip()
     st['server_ip'] = ip
     
-    port = ask("Xray Port", str(st.get('xray_port', 444)))
-    st['xray_port'] = int(port)
+    port_raw = ask("Xray Port", str(st.get('xray_port', 444)))
+    try:
+        port_num = int(port_raw)
+        if not 1 <= port_num <= 65535:
+            raise ValueError
+        st['xray_port'] = port_num
+    except ValueError:
+        print(f"  {ylw('Invalid port, keeping previous value.')}")
     
     if askyn("Generate new UUID?", False):
         st['uuid'] = guuid()
         print(f"  {grn(STR)}  {grn('New UUID:')} {wht(st['uuid'])}")
     
-    uuid_input = ask("UUID (Enter to keep current)", "")
+    uuid_input = ask("UUID (Enter to keep current)", st['uuid'])
     if uuid_input:
         st['uuid'] = uuid_input
     
@@ -794,6 +837,7 @@ def set_token(st):
     
     print(f"\n  {dim('Get your token from:')} {cyn('https://app.netlify.com/user/applications#personal-access-tokens')}")
     print(f"  {dim('Required scopes:')} {wht('Sites: Read & Write')}")
+    print(f"  {dim('Tip: for non-interactive use, export NETLIFY_AUTH_TOKEN instead of --token')}")
     print()
     
     token = ask("Netlify Personal Access Token", "")
@@ -942,6 +986,7 @@ def deploy_netlify(st):
         )
         if result.returncode != 0:
             spinner_stop()
+            shutil.rmtree(work_dir, ignore_errors=True)
             print(f"  {red(CRS)}  {red('Deploy failed!')}")
             out = result.stdout[-500:] if len(result.stdout) > 500 else result.stdout
             print(f"  {dim(out)}")
@@ -964,6 +1009,7 @@ def deploy_netlify(st):
             print(f"  {grn(STR)}  {grn('Edge functions bundled successfully!')}")
     except Exception as e:
         spinner_stop()
+        shutil.rmtree(work_dir, ignore_errors=True)
         print(f"  {red(CRS)}  {red(f'Deploy error: {e}')}")
         save_st(st)
         pause()
@@ -1027,6 +1073,7 @@ def deploy_netlify(st):
     except Exception as e:
         print(f"  {ylw(chr(0x26a0))}  {ylw(f'Test failed: {e}')}")
     
+    shutil.rmtree(work_dir, ignore_errors=True)
     print(f"  {grn(CHK)}  {grn('Deployment successful!')}")
     print(f"  {icon_kv(SQR, 'Site URL', deployed_url, val_color=mint)}")
     print(f"  {icon_kv(SQR, 'SecPath', secp + '/')}")
@@ -1171,6 +1218,10 @@ def manage_deps(st):
         print(f"  {grn(CHK)}  {grn('Latest deployment removed.')}")
     
     elif rv == "2":
+        if not askyn("Delete ALL deployments from Netlify? This cannot be undone.", False):
+            print(f"  {gry('Cancelled.')}")
+            pause()
+            return st
         if token:
             for dep in deps:
                 if dep.get('site_id'):
@@ -1240,14 +1291,9 @@ def xray_menu(st):
         save_st(st)
         print(f"  {grn(CHK)}  {grn(f'Config generated: {cfg}')}")
         
-        # Check for TLS certs
-        cert_path = f"{XDIR}/cert.pem"
-        key_path = f"{XDIR}/key.pem"
-        if not os.path.isfile(cert_path) or not os.path.isfile(key_path):
-            print(f"\n  {ylw('⚠')}  {ylw('TLS certificates not found at:')}")
-            print(f"    {dim(f'{cert_path}')}")
-            print(f"    {dim(f'{key_path}')}")
-            print(f"  {dim('Place your certificate files before starting Xray.')}")
+        # The relay hop (Netlify -> VPS) is plain HTTP by design;
+        # client traffic is TLS-encrypted up to Netlify. See SECURITY.md.
+        print(f"  {dim('Relay hop is plain HTTP by design; client TLS ends at Netlify.')}")
     
     elif rv == "2":
         if not installed:
@@ -1287,7 +1333,7 @@ def show_config(st):
     print(f"\n  {section_divider('FULL CONFIGURATION')}\n")
     
     lines = [
-        f"{gold(DIA)}  {cyn('UUID')}            {wht(st.get('uuid', ''))}",
+        f"{gold(DIA)}  {cyn('UUID')}            {wht(st.get('uuid', '')[:8] + '...')}",
         f"{gold(DIA)}  {cyn('Server IP')}       {wht(st.get('server_ip', ''))}",
         f"{gold(DIA)}  {cyn('Xray Port')}       {wht(str(st.get('xray_port', 444)))}",
         f"{gold(DIA)}  {cyn('Secret Path')}     {wht(st.get('secp', ''))}",
@@ -1304,6 +1350,57 @@ def show_config(st):
     
     # Config file path
     print(f"\n  {dim('Config stored at:')} {cyn(SFILE)}")
+    pause()
+
+# ═══════════════════════════════════════════════════════════
+#  SPEED TEST  —  raw VPS network throughput
+# ═══════════════════════════════════════════════════════════
+def speed_test(st):
+    print(f"\n  {section_divider('SPEED TEST')}\n")
+    print(f"  {dim('Measuring server network speed...')}\n")
+
+    # Latency to a well-known anycast target
+    avg_ms = None
+    try:
+        r = subprocess.run(["ping", "-c", "4", "-q", "8.8.8.8"],
+                           capture_output=True, text=True, timeout=25)
+        m = re.search(r"rtt min/avg/max/mdev = [\d.]+/([\d.]+)/", r.stdout)
+        if m:
+            avg_ms = float(m.group(1))
+    except Exception:
+        pass
+    if avg_ms is not None:
+        print(f"  {icon_kv(SQR, 'Latency', f'{avg_ms:.1f} ms  (to 8.8.8.8)')}")
+    else:
+        print(f"  {icon_kv(SQR, 'Latency', ylw('unavailable'))}")
+
+    # Download throughput: 100MB via Cloudflare, fallback to CacheFly
+    dl_mbps = None
+    for url in ("https://speed.cloudflare.com/__down?bytes=100000000",
+                "https://cachefly.cachefly.net/100mb.test"):
+        try:
+            sp = spinner_start("Download test (100MB)...")
+            r = subprocess.run(
+                ["curl", "-sL", "-o", "/dev/null", "-w", "%{speed_download}",
+                 "--max-time", "60", url],
+                capture_output=True, text=True, timeout=70)
+            spinner_stop()
+            bps = float(r.stdout.strip().split()[0])
+            if bps > 0:
+                dl_mbps = bps * 8 / 1e6
+                break
+        except Exception:
+            try:
+                spinner_stop()
+            except Exception:
+                pass
+    if dl_mbps:
+        print(f"  {icon_kv(SQR, 'Download', f'{dl_mbps:.1f} Mbps', val_color=mint)}")
+    else:
+        print(f"  {icon_kv(SQR, 'Download', ylw('test failed'))}")
+    print()
+    print(f"  {dim('Note: this measures the VPS uplink. Real-world speed also')}")
+    print(f"  {dim('depends on the Netlify edge region and your own connection.')}")
     pause()
 
 # ═══════════════════════════════════════════════════════════
@@ -1335,6 +1432,7 @@ def main_menu(st):
             ("6", "Manage Deployments",       "View, delete sites"),
             ("7", "Xray Service Control",     "Start, stop, restart, logs"),
             ("8", "Show Full Config",         "View all settings"),
+            ("9", "Speed Test",               "Check server network speed"),
         ]
         
         max_label_len = max(len(l) for _, l, _ in menu_items)
@@ -1354,7 +1452,7 @@ def main_menu(st):
         print(f"    {teal(SQR)}  {bold('[0]')}  {gry('Exit')}")
         print()
         
-        rv = input(f"  {gold(ARR)} {bold('Select')} {dim('[0-8]')}: ").strip()
+        rv = input(f"  {gold(ARR)} {bold('Select')} {dim('[0-9]')}: ").strip()
         
         if rv == "0" or rv.lower() == "q":
             print(f"\n  {gradient_text('  Goodbye!', GRAD_GREEN)}\n")
@@ -1367,6 +1465,7 @@ def main_menu(st):
         elif rv == "6": st = manage_deps(st)
         elif rv == "7": st = xray_menu(st)
         elif rv == "8": show_config(st)
+        elif rv == "9": speed_test(st)
         
         st = load_st()  # Refresh state
 
@@ -1460,7 +1559,7 @@ if __name__ == "__main__":
             elif args[i] == '--auto' or args[i] == '-a':
                 auto = True
                 i += 1
-            elif args[i] == '--token=':
+            elif args[i].startswith('--token='):
                 # --token=TOKEN format
                 token_arg = args[i].split('=', 1)[1]
                 i += 1
@@ -1468,8 +1567,11 @@ if __name__ == "__main__":
                 i += 1
 
         if auto:
+            # Prefer env var so the token never appears in `ps` / shell history
             if not token_arg:
-                print(f"  {red(CRS)}  {red('Error: --auto requires --token <TOKEN>')}")
+                token_arg = os.environ.get("NETLIFY_AUTH_TOKEN", "").strip()
+            if not token_arg:
+                print(f"  {red(CRS)}  {red('Error: --auto requires --token <TOKEN> or NETLIFY_AUTH_TOKEN env var')}")
                 sys.exit(1)
             auto_setup(token_arg)
         else:

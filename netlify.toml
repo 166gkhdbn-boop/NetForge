@@ -1,13 +1,19 @@
+# ─────────────────────────────────────────────────────────────
+# NetForge netlify.toml — TEMPLATE
+# Generated at deploy time by deploy.sh (TOML_CFG).
+# __SECPATH__ is a placeholder replaced per-deployment.
+# Do NOT commit real secret paths to this repo.
+# ─────────────────────────────────────────────────────────────
 [build]
   publish = "public"
 
 [[edge_functions]]
   function = "relay"
-  path = "/nf-REDACTED"
+  path = "__SECPATH__"
 
 [[edge_functions]]
   function = "relay"
-  path = "/nf-REDACTED/*"
+  path = "__SECPATH__/*"
 
 [[edge_functions]]
   function = "relay"
