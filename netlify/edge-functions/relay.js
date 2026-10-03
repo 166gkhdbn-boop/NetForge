@@ -31,6 +31,12 @@ export default async (request, context) => {
       const resp = await fetch(origin + path + url.search, opts);
       const rh = new Headers(resp.headers);
       rh.delete("content-encoding");
+      // XHTTP download is a long-lived streaming GET. If the CDN caches or
+      // buffers it, the stream hangs and the client never receives data.
+      // Forbid any caching/buffering of relayed responses.
+      rh.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+      rh.set("Pragma", "no-cache");
+      rh.set("CDN-Cache-Control", "no-store");
       return new Response(resp.body, {status: resp.status, headers: rh});
     } catch(e) {
       return new Response("relay error: " + e.message, {status: 502});
