@@ -1177,13 +1177,13 @@ def gen_vless(st):
     # per session because pinned fingerprints (e.g. chrome) get burned.
     # Server stays on mode "auto", so no server change is needed for this.
     up_extra = {
-        "xPaddingBytes": "100-1200",
+        "xPaddingBytes": "100-1000",
         "scMaxEachPostBytes": "32768-65536",
         "scMinPostsIntervalMs": "20-60",
         "xmux": {
-            "maxConnections": {"from": 2, "to": 3},
-            "cMaxReuseTimes": {"from": 8, "to": 16},
-            "hMaxReusableSecs": {"from": 30, "to": 60},
+            "maxConnections": "2-3",
+            "cMaxReuseTimes": "8-16",
+            "hMaxReusableSecs": "30-60",
         },
         "headers": {"x-host": f"{ip}:{port}"},
     }
@@ -1204,7 +1204,7 @@ def gen_vless(st):
         f"{gold(DIA)}  {cyn('POST size')}     {wht('32-64 KB')}  {dim('paced 20-60 ms')}",
         f"{gold(DIA)}  {cyn('Connections')}   {wht('2-3 parallel')}  {dim('rotated every 8-16 uses / 30-60 s')}",
         f"{gold(DIA)}  {cyn('Fingerprint')}   {wht('randomized')}",
-        f"{gold(DIA)}  {cyn('Padding')}       {wht('100-1200 B')}  {dim('random per request')}",
+        f"{gold(DIA)}  {cyn('Padding')}       {wht('100-1000 B')}  {dim('random per request')}",
     ]
     print(f"\n  {double_box(up_lines, 64, title='Upload-Bypass Link (Iran mode)', title_color=C.GOLD, border_color=C.TEAL)}")
     print(f"\n  {dim('Use this link when upload is throttled or the standard link gets detected.')}")
