@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-2.0-00d4ff?style=for-the-badge&logo=github&logoColor=white" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.1-00d4ff?style=for-the-badge&logo=github&logoColor=white" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-00d4ff?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/XRay-Core-1.8+-00d4ff?style=for-the-badge" alt="XRay">
@@ -42,10 +42,12 @@
 | 🎨 **Beautiful CLI** | Gradient text, animated spinners, double-line boxes, 256-color terminal UI |
 | 🔄 **Easy Deploy** | One command to deploy a relay site to Netlify |
 | 📋 **VLESS Link Generator** | Generates ready-to-use connection links with xPadding |
-| 📝 **Config Manager** | Interactive configuration for UUID, SNI, ports, and paths |
+| 📝 **Config Manager** | Interactive configuration for UUID, server IP, ports, and paths |
 | 📱 **Fake Website** | Deploys a realistic DevPulse analytics site as cover |
 | 🐐 **Systemd Service** | Manages Xray as a system service with start/stop/restart |
 | 🔧 **Deployment Manager** | View, track, and delete Netlify deployments |
+| 🚀 **Speed Tuning** | BBR congestion control + raised socket buffers for max throughput |
+| 📊 **Speed Test** | Built-in VPS latency & download speed test |
 
 ---
 
@@ -100,7 +102,6 @@ bash deploy.sh
 - **Python 3.8+** (usually pre-installed on most servers)
 - **Root access** (for Xray installation and systemd service)
 - **Netlify account** with a Personal Access Token
-- **TLS certificate** for your server's domain (for Xray TLS)
 
 ---
 
@@ -118,7 +119,7 @@ bash deploy.sh
   ║     ╚══╝  ╚═╝╚═╝╚═╝╚═╝╚═╝╚═╝ ║
   ║ ║
   ║        ★ XHTTP/Netlify Relay Manager ★        ║
-  ║           v2.0  |  by NetForge                ║
+  ║           v2.1  |  by NetForge                ║
   ║ ║
   ╠════════════════════════════════════════════════════════════════╖
   ║                                                       ║
@@ -126,8 +127,7 @@ bash deploy.sh
   ║  ◆  Xray Status     ✔ v1.8.24                   ║
   ║  ◆  Xray Port       444                         ║
   ║  ◆  UUID            a1b2c3d4...                  ║
-  ║  ◆  SNI             kind.sigs.k8s.io            ║
-  ║  ◆  Netlify Token   SET                         ║
+    ║  ◆  Netlify Token   SET                         ║
   ║  ◆  Site URL        https://dp-abc.netlify.app  ║
   ║  ■ [1] Install / Update Xray    Download & setup  ║
   ║  ■ [2] Configure Settings       UUID, SNI, port   ║
@@ -170,12 +170,14 @@ All settings are stored in `~/.vless-netlify/config.json` and persist between ru
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `uuid` | Auto-generated | VLESS user UUID |
-| `sni` | `kind.sigs.k8s.io` | Primary TLS SNI |
-| `alt_sni` | `dl.google.com` | Alternative SNI |
+| `uuid` | Auto-generated (UUIDv4) | VLESS user UUID |
+| `server_ip` | Auto-detected | Your VPS public IP (origin for the relay) |
 | `xray_port` | `444` | Xray listening port |
-| `secp` | Random | Secret path for relay |
+| `secp` | Random (`/nf-<hex>/`) | Secret path for the relay |
 | `netlify_token` | — | Netlify Personal Access Token |
+
+> The VLESS link always uses the Netlify site hostname as SNI — it is derived
+> automatically and not configurable.
 
 ---
 
@@ -201,12 +203,15 @@ All settings are stored in `~/.vless-netlify/config.json` and persist between ru
 | 6 | Manage Deployments | View, delete, or clear Netlify deployments |
 | 7 | Xray Service Control | Start, stop, restart Xray; view logs |
 | 8 | Show Full Config | Display all current settings |
+| 9 | Speed Test | Measure VPS latency & download speed |
 
 ---
 
 ## ⚠️ Important Notes
 
-- **TLS Certificate Required**: You need a valid TLS certificate for your server's domain before starting Xray
+- **Security model**: client → Netlify is TLS-encrypted, but the
+  Netlify → VPS hop is plain HTTP by design. Read [SECURITY.md](SECURITY.md)
+  before deploying.
 - **Xray listens on HTTP/2**: The XHTTP transport requires H2 support
 - **Netlify Free Tier**: Works on Netlify's free plan (100GB bandwidth/month)
 - **One Deployment per Run**: Each deploy creates a new Netlify site
