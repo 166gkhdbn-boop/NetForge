@@ -199,11 +199,24 @@ All settings are stored in `~/.vless-netlify/config.json` and persist between ru
 | 2 | Configure Settings | Set UUID, SNI, server IP, port, secret path |
 | 3 | Set Netlify Token | Configure your Netlify Personal Access Token |
 | 4 | Deploy to Netlify | Create a new relay site with edge function |
-| 5 | Generate VLESS Link | Create connection links (full + QR-friendly) |
-| 6 | Manage Deployments | View, delete, or clear Netlify deployments |
+| 5 | Generate VLESS Link | Standard link + Upload-Bypass link (Iran mode) |
+
+---
 | 7 | Xray Service Control | Start, stop, restart Xray; view logs |
 | 8 | Show Full Config | Display all current settings |
 | 9 | Speed Test | Measure VPS latency & download speed |
+
+---
+
+## 📦 Packet-up profile
+
+Option 5 also prints a second link using XHTTP `packet-up` mode: the upload leg
+is split into small, paced POST requests (`scMaxEachPostBytes` 32–64 KB,
+`scMinPostsIntervalMs` 20–60 ms) with random per-request padding
+(`xPaddingBytes` 100–1200 B), rotating short-lived connections
+(`xmux.maxConnections` 2–3, `cMaxReuseTimes` 8–16, `hMaxReusableSecs` 30–60 s),
+and a randomized TLS fingerprint (`fp=randomized`). The server accepts both
+profiles on `mode=auto` — no server changes needed.
 
 ---
 

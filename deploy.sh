@@ -725,19 +725,19 @@ def gen_xray_cfg(st):
     # so the inbound MUST stay on "none". Switching this to "tls" would break
     # the relay (and no public CA issues certificates for a bare IP anyway).
     # See SECURITY.md for the full threat model of the Netlify -> VPS hop.
+    # Server stays on mode "auto" so it accepts any client profile
+    # (standard stream, or packet-up upload-bypass). The tunables below are
+    # the real Xray XHTTP options (transport/internet/splithttp/config.proto).
     stream = {
         "network": "xhttp",
         "security": "none",
         "xhttpSettings": {
             "path": secp + "/",
             "mode": "auto",
-            "extra": {
-                "xPaddingBytes": "1-1",
-                "xPaddingObfsMode": True,
-                "xPaddingKey": "iran",
-                "xPaddingHeader": "iran",
-                "scMaxEachPostBytes": "1000000"
-            }
+            # Random per-request padding defeats size-based fingerprinting.
+            "xPaddingBytes": {"from": 100, "to": 1000},
+            "scMaxEachPostBytes": {"from": 1000000, "to": 1000000},
+            "scMaxBufferedPosts": 30,
         }
     }
     
@@ -1107,13 +1107,13 @@ def gen_vless(st):
     ip = st.get('server_ip', '')
     port = st.get('xray_port', 444)
     
-    # Build extra JSON with all xPadding settings + x-host header
+    # Real Xray XHTTP options (transport/internet/splithttp/config.proto).
+    # Ranges use {"from": x, "to": y} objects — the canonical proto JSON form.
+    # NOTE: xPaddingObfsMode / xPaddingKey / xPaddingHeader are not real Xray
+    # options (silently ignored) — do not re-add them.
     extra_obj = {
-        "xPaddingBytes": "1-1",
-        "xPaddingObfsMode": True,
-        "scMaxEachPostBytes": "1000000",
-        "xPaddingKey": "iran",
-        "xPaddingHeader": "iran",
+        "xPaddingBytes": {"from": 100, "to": 1000},
+        "scMaxEachPostBytes": {"from": 1000000, "to": 1000000},
         "headers": {
             "x-host": f"{ip}:{port}"
         }
@@ -1168,7 +1168,53 @@ def gen_vless(st):
     print(f"  {dim(T * 58)}")
     for i, chunk in enumerate(textwrap.wrap(link_short, 76)):
         print(f"  {silver(chunk)}")
-    
+
+    # ── Upload-bypass profile ("Iran mode") ──────────────────────────
+    # packet-up turns the upload leg into many small, paced POST requests
+    # that look like ordinary web uploads — this defeats throttlers that
+    # target long-lived upload streams, and short rotating connections give
+    # DPI nothing stable to latch onto. The TLS fingerprint is randomized
+    # per session because pinned fingerprints (e.g. chrome) get burned.
+    # Server stays on mode "auto", so no server change is needed for this.
+    up_extra = {
+        "xPaddingBytes": {"from": 100, "to": 1200},
+        "scMaxEachPostBytes": {"from": 32768, "to": 65536},
+        "scMinPostsIntervalMs": {"from": 20, "to": 60},
+        "xmux": {
+            "maxConnections": {"from": 2, "to": 3},
+            "cMaxReuseTimes": {"from": 8, "to": 16},
+            "hMaxReusableSecs": {"from": 30, "to": 60},
+        },
+        "headers": {"x-host": f"{ip}:{port}"},
+    }
+    up_extra_enc = urllib.parse.quote(json.dumps(up_extra, separators=(",", ":")))
+    up_link = (
+        f"vless://{uuid}@{site_host}:443?"
+        f"type=xhttp&security=tls&sni={site_host}"
+        f"&path={urllib.parse.quote(secp + '/')}&mode=packet-up"
+        f"&alpn=h2%2Chttp%2F1.1&encryption=none"
+        f"&fp=randomized"
+        f"&host={site_host}"
+        f"&extra={up_extra_enc}"
+        f"#NetForge-UploadBypass"
+    )
+
+    up_lines = [
+        f"{gold(DIA)}  {cyn('Mode')}          {wht('packet-up')}  {dim('(upload as small POSTs)')}",
+        f"{gold(DIA)}  {cyn('POST size')}     {wht('32-64 KB')}  {dim('paced 20-60 ms')}",
+        f"{gold(DIA)}  {cyn('Connections')}   {wht('2-3 parallel')}  {dim('rotated every 8-16 uses / 30-60 s')}",
+        f"{gold(DIA)}  {cyn('Fingerprint')}   {wht('randomized')}",
+        f"{gold(DIA)}  {cyn('Padding')}       {wht('100-1200 B')}  {dim('random per request')}",
+    ]
+    print(f"\n  {double_box(up_lines, 64, title='Upload-Bypass Link (Iran mode)', title_color=C.GOLD, border_color=C.TEAL)}")
+    print(f"\n  {dim('Use this link when upload is throttled or the standard link gets detected.')}")
+    print(f"  {dim('Tip: in v2rayNG also enable Settings > Fragment Setting (packets=tlshello,')}")
+    print(f"  {dim('length=50-100, interval=10-20) — it splits the TLS handshake so DPI')}")
+    print(f"  {dim('cannot read the SNI/fingerprint on the upload path.')}")
+    print(f"  {dim(T * 58)}")
+    for chunk in textwrap.wrap(up_link, 76):
+        print(f"  {mint(chunk)}")
+
     # In auto mode, print raw link for easy copying
     if AUTO_MODE:
         print(f"\n{link}")
