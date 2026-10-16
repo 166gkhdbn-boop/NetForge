@@ -44,8 +44,8 @@ cat > /usr/local/xray/config.json << XCFG
         "xhttpSettings": {
           "path": "$SECP/",
           "mode": "auto",
-          "xPaddingBytes": {"from": 100, "to": 1000},
-          "scMaxEachPostBytes": {"from": 1000000, "to": 1000000},
+          "xPaddingBytes": "100-1000",
+          "scMaxEachPostBytes": 1000000,
           "scMaxBufferedPosts": 30
         }
       },

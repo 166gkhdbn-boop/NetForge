@@ -735,8 +735,8 @@ def gen_xray_cfg(st):
             "path": secp + "/",
             "mode": "auto",
             # Random per-request padding defeats size-based fingerprinting.
-            "xPaddingBytes": {"from": 100, "to": 1000},
-            "scMaxEachPostBytes": {"from": 1000000, "to": 1000000},
+            "xPaddingBytes": "100-1000",
+            "scMaxEachPostBytes": 1000000,
             "scMaxBufferedPosts": 30,
         }
     }
@@ -1112,8 +1112,8 @@ def gen_vless(st):
     # NOTE: xPaddingObfsMode / xPaddingKey / xPaddingHeader are not real Xray
     # options (silently ignored) — do not re-add them.
     extra_obj = {
-        "xPaddingBytes": {"from": 100, "to": 1000},
-        "scMaxEachPostBytes": {"from": 1000000, "to": 1000000},
+        "xPaddingBytes": "100-1000",
+        "scMaxEachPostBytes": 1000000,
         "headers": {
             "x-host": f"{ip}:{port}"
         }
@@ -1177,9 +1177,9 @@ def gen_vless(st):
     # per session because pinned fingerprints (e.g. chrome) get burned.
     # Server stays on mode "auto", so no server change is needed for this.
     up_extra = {
-        "xPaddingBytes": {"from": 100, "to": 1200},
-        "scMaxEachPostBytes": {"from": 32768, "to": 65536},
-        "scMinPostsIntervalMs": {"from": 20, "to": 60},
+        "xPaddingBytes": "100-1200",
+        "scMaxEachPostBytes": "32768-65536",
+        "scMinPostsIntervalMs": "20-60",
         "xmux": {
             "maxConnections": {"from": 2, "to": 3},
             "cMaxReuseTimes": {"from": 8, "to": 16},
